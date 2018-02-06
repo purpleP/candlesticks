@@ -28,6 +28,9 @@ dependencies:
 - conduit-extra
 - containers
 - json-stream
+- mtl
+- lens
+- vector
 
 library:
   source-dirs: src

@@ -3,6 +3,8 @@ module Main where
 import Data.Aeson
 import Data.Conduit
 import Data.Ord
+import Control.Monad.State
+import qualified Data.Vector as V
 import qualified Data.Map.Lazy as Map
 import GHC.Exts (groupWith)
 import qualified Data.Conduit.Combinators as CC
@@ -11,39 +13,52 @@ import Data.ByteString.Char8 as BC hiding (last, head, maximum, minimum, map)
 import qualified Data.Conduit.Binary as CB
 import Data.JsonStream.Parser hiding ((.|))
 import System.IO (stdin, stdout)
+import Control.Lens
 
 
-jsonParse :: Conduit BC.ByteString IO Value
-jsonParse = doParse parseOutput
+jsonParseValue :: Parser a -> Conduit BC.ByteString IO a
+jsonParseValue parser = doParse $ runParser parser
     where
-        parseOutput :: ParseOutput Value
-        parseOutput = runParser value
-
-        doParse :: ParseOutput Value -> Conduit BC.ByteString IO Value
+        doParse :: ParseOutput a -> Conduit BC.ByteString IO a
         doParse out = case out of
                         ParseYield value newOutput  -> do
                             yield value
                             doParse newOutput
                         ParseNeedData cont ->
-                            awaitForever $ \i -> doParse (cont i)
+                            awaitForever $ doParse . cont
                         ParseDone remaining -> return ()
                         ParseFailed err -> error err
 
+first (_, _, x, _, _, _) = x
+second (_, _, _, x, _, _) = x
+third (_, _, _, _, x, _) = x
+fourth (_, _, _, _, _, x) = x
 
-makeCandle :: (Num a, Ord a) => [a] -> (a, a, a, a)
-makeCandle vs = (maximum vs, minimum vs, head vs, last vs)
+group' :: (Ord b) => (a -> b) -> [a] -> [(b, [a])]
+group' k vs = map (\g -> (k $ head g, g)) $ groupWith k vs
 
+candle :: (Num a, Ord a) => V.Vector (Int, Int, a, a, a, a) -> (a, a, a, a)
+candle vs = (V.maximum $ V.map first vs, V.minimum $ V.map second vs, third $ V.head vs, fourth $ V.last vs)
 
+candles :: (Num a, Ord a) => [(Int, Int, a, a, a, a)] -> Map.Map Int (Map.Map Int (a, a, a, a))
+candles vs = Map.fromList $ Prelude.map (\(k, g) ->  (k, Map.fromList $ Prelude.map (\(t, gt) -> (t, candle $ V.fromList gt)) $ group' (\(_, x, _, _, _, _) -> x) g)) $ group' (\(x, _, _, _, _, _) -> x) vs
 
-key (k, _, _) = k
-val (_, _, v) = v
-mnt (_, m, _) = m
+update :: (Ord a) => Map.Map Int (Map.Map Int (a, a, a, a)) -> Map.Map Int (Map.Map Int (a, a, a, a)) -> Map.Map Int (Map.Map Int (a, a, a, a))
+update new old = Map.unionWith (Map.unionWith (\(mm1, mn1, o1, c1) (mm2, mn2, o2, c2) -> (max mm1 mm2, min mn1 mn2, o1, max c1 c2))) old new
 
+diff' old new = Map.differenceWith (\ n o -> Just (Map.differenceWith (\ x y -> Just x) n o)) new old
 
+diff cs = do
+    old <- get
+    modify $ update cs
+    new <- get
+    return $ diff' old new
 
+s = return Map.empty :: State (Map.Map Int (Map.Map Int (a, a, a, a))) (Map.Map Int (Map.Map Int (a, a, a, a)))
 
-process :: (Num a, Ord a) => [(String, Int, a)] -> [(Int, a, a, a, a)]
-process = undefined
--- process = map map (\ (_, _, x) -> x) groupWith snd groupWith fst
-
-main = runConduit $ CB.sourceHandle stdin .| jsonParse .| CC.map (pack . show) .| CB.sinkHandle stdout
+main = runConduit $ CB.sourceHandle stdin
+                 .| jsonParseValue ((arrayOf $ (,,,,,) <$> arrayWithIndexOf 0 value <*> arrayWithIndexOf 1 value <*> arrayWithIndexOf 2 value <*> arrayWithIndexOf 2 value <*> arrayWithIndexOf 2 value <*> arrayWithIndexOf 2 value) :: Parser (Int, Int, Int, Int, Int, Int))
+                 .| CC.map candles
+                 .| lift diff
+                 .| pack . show
+                 .| CB.sinkHandle stdout
